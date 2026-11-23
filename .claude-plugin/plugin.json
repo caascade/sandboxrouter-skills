@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "homepage": "https://sandboxrouter.io",
   "repository": "https://github.com/caascade/sandboxrouter-skills",
+  "license": "Apache-2.0",
   "author": {
     "name": "Sandbox Router",
     "url": "https://sandboxrouter.io"
