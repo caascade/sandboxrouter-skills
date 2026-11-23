@@ -126,6 +126,8 @@ function exec(s) {
   if (command.length > 32 || command.some((w) => !w || w.length > 512)) fail(2, "the command needs 1 to 32 nonempty arguments of at most 512 characters");
   const execId = crypto.randomUUID();
   if (opts.detach) return out(opts.json ? JSON.stringify({ execId, state: "running" }) : `Exec ${execId} running. Read it with sandboxrouter sandboxes exec ${s.metadata.name} ${execId}`);
+  // Like the real Daytona provider, which refuses a per-command working directory.
+  if (one("workdir") && s.status.provider.name === "daytona") fail(1, "this sandbox's provider does not offer exec.cwd");
   const cwd = mapPath(uid, one("workdir") ?? WORKDIR);
   fs.mkdirSync(cwd, { recursive: true });
   // github.com over HTTPS: the scenario's local repos when the sandbox has the GitHub connector, else a path that fails.

@@ -52,11 +52,12 @@ In a git repo it copies what git tracks plus untracked files that aren't ignored
 ### 3. Run commands
 
 ```sh
-sandboxrouter sandboxes exec <uid> --workdir <dir> -- sh -c 'npm ci && npm test > /tmp/test.log 2>&1; echo "exit $?"'
+sandboxrouter sandboxes exec <uid> -- sh -c 'cd <dir> && npm ci && npm test > /tmp/test.log 2>&1; echo "exit $?"'
 sandboxrouter sandboxes exec <uid> -- tail -n 50 /tmp/test.log
 ```
 
 - Commands run **without a shell**. For `&&`, pipes, `>` or globs, wrap them in `sh -c '…'`.
+- Put `cd <dir> &&` inside `sh -c` rather than passing `--workdir`: some providers (Daytona, for one) refuse `--workdir` with `does not offer exec.cwd`. The same goes for `--env`: use `export NAME=value;` inside `sh -c`.
 - `exec` exits with the command's own exit code.
 - For anything that may take minutes, use `--detach` and poll: see [reference/long-jobs.md](reference/long-jobs.md).
 

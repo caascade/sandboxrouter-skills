@@ -31,6 +31,7 @@ sandboxrouter sandboxes logs <uid>    # each state it reached, and each provider
 | `image tag not found` / `image must belong to this tenant` | Image not in this workspace's registry | Ask the user to push it |
 | Command not found in the sandbox | The Default image is minimal | `apk add --no-cache <pkg>` (needs `dl-cdn.alpinelinux.org` if egress is limited) |
 | `&&`, `|`, `>` or `*` don't work | `exec` runs without a shell | Wrap the command: `sh -c '…'` |
+| `this sandbox's provider does not offer exec.cwd` (or `exec.env`, `exec.stdin`, `exec.timeout`) | That provider lacks the `exec` option | Drop the flag: `cd <dir> &&` or `export NAME=value;` inside `sh -c`; for a time limit, `--detach` and poll |
 | Long `sh -c` fails | Each argument is at most 512 characters | Upload a script with `files put`, then run `sh /path/script.sh` |
 | Network calls fail with `--egress` set | The host isn't in the list, or it's an IP address or `localhost` | `sandboxes update <uid> --egress HOST1 --egress HOST2 …` with every host, since it replaces the list. A list never allows IPs |
 | Private clone fails | No GitHub connector on the sandbox, or its account isn't connected | Create a new sandbox with `--connector github`; ask an owner to connect it (see [files-and-code.md](files-and-code.md)) |
