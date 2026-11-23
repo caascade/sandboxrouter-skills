@@ -1,0 +1,9 @@
+#!/bin/sh
+# A Linux answer for commands run in a stand-in sandbox.
+case "${1:-}" in
+  -a) echo "Linux sandbox 6.1.0 #1 SMP PREEMPT_DYNAMIC x86_64 GNU/Linux" ;;
+  -m|-p) echo x86_64 ;;
+  -n) echo sandbox ;;
+  -r) echo 6.1.0 ;;
+  *) echo Linux ;;
+esac

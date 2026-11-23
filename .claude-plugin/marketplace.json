@@ -1,0 +1,18 @@
+{
+  "name": "sandboxrouter",
+  "owner": {
+    "name": "Sandbox Router",
+    "url": "https://sandboxrouter.io"
+  },
+  "metadata": {
+    "description": "Agent Skills for Sandbox Router (sandboxrouter.io): run code in cloud sandboxes from your coding agent",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "sandboxrouter",
+      "description": "Run tests, builds and long jobs in Sandbox Router cloud sandboxes with the sandboxrouter CLI: setup, create, copy code in and results out, run commands, clean up",
+      "source": "./"
+    }
+  ]
+}

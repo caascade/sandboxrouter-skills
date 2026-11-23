@@ -1,0 +1,11 @@
+{
+  "name": "sandboxrouter",
+  "description": "Run tests, builds and long jobs in Sandbox Router cloud sandboxes with the sandboxrouter CLI: setup, create, copy code in and results out, run commands, clean up",
+  "version": "0.1.0",
+  "homepage": "https://sandboxrouter.io",
+  "repository": "https://github.com/caascade/sandboxrouter-skills",
+  "author": {
+    "name": "Sandbox Router",
+    "url": "https://sandboxrouter.io"
+  }
+}

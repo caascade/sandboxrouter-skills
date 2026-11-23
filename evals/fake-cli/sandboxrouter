@@ -1,0 +1,191 @@
+#!/usr/bin/env node
+// A stand-in for the `sandboxrouter` CLI, for evals: no network, no sandboxes, no cost.
+//
+// It answers the commands the skill uses with the real CLI's output shapes and exit codes, keeps its sandboxes in
+// $EVAL_SR_FAKE_HOME, and appends every call (argv as a JSON array) to $EVAL_SR_FAKE_HOME/calls.log for graders to read.
+// A sandbox's filesystem is the folder $EVAL_SR_FAKE_HOME/sandboxes/<uid>/root: sandbox paths under /home/user, /tmp and
+// /workspace map into it, and `exec` runs the command on this machine in that folder.
+//
+// Scenario files in $EVAL_SR_FAKE_HOME (written by a case's scaffold):
+//   unconfigured   every command but `configure` and `help` exits 2, as with no saved namespace
+//   accounts       the user's own provider accounts, one name a line (e.g. e2b); empty or missing: Native only
+//   connectors     the workspace's connectors, one ID a line (e.g. github)
+//   sandboxes.json the sandboxes that exist (created by this CLI; a scaffold may seed someone else's)
+//   repos/OWNER/REPO  repo trees that `git clone https://github.com/OWNER/REPO` copies in a sandbox created with
+//                  `--connector github`; without the connector, a clone of a github.com URL fails as unauthenticated
+"use strict";
+const fs = require("node:fs");
+const path = require("node:path");
+const { spawnSync } = require("node:child_process");
+const crypto = require("node:crypto");
+
+// The state folder: $EVAL_SR_FAKE_HOME, else the folder this file was installed in as <state>/bin/sandboxrouter (which
+// evals/fake-cli/setup.sh does, at <workspace>/.sandboxrouter), else ./.sandboxrouter.
+const installedIn = path.dirname(path.dirname(fs.realpathSync(__filename)));
+const HOME = process.env.EVAL_SR_FAKE_HOME
+  || (path.basename(installedIn) === ".sandboxrouter" ? installedIn : path.join(process.cwd(), ".sandboxrouter"));
+const NAMESPACE = "acme";
+const WORKDIR = "/home/user";
+const MAPPED = ["/home/user", "/tmp", "/workspace"];
+fs.mkdirSync(HOME, { recursive: true });
+const argv = process.argv.slice(2);
+fs.appendFileSync(path.join(HOME, "calls.log"), JSON.stringify(argv) + "\n");
+
+const out = (s) => process.stdout.write(s.endsWith("\n") ? s : s + "\n");
+const fail = (code, message) => { process.stderr.write(`sandboxrouter: ${message}\n`); process.exit(code); };
+const real = (p) => { try { return fs.realpathSync(p); } catch { return p; } };
+const lines = (file) => { try { return fs.readFileSync(path.join(HOME, file), "utf8").split("\n").map((l) => l.trim()).filter(Boolean); } catch { return []; } };
+const load = () => { try { return JSON.parse(fs.readFileSync(path.join(HOME, "sandboxes.json"), "utf8")); } catch { return []; } };
+const save = (list) => fs.writeFileSync(path.join(HOME, "sandboxes.json"), JSON.stringify(list, null, 2));
+
+// Options before `--`; the command after it.
+const dash = argv.indexOf("--");
+const head = dash === -1 ? argv : argv.slice(0, dash);
+const command = dash === -1 ? null : argv.slice(dash + 1);
+const positional = [], opts = {};
+for (let i = 0; i < head.length; i++) {
+  const a = head[i];
+  if (!a.startsWith("--")) { positional.push(a); continue; }
+  const name = a.slice(2);
+  if (["json", "detach", "stdin", "no-egress", "no-labels"].includes(name)) { opts[name] = true; continue; }
+  (opts[name] ??= []).push(head[++i]);
+}
+const one = (name) => opts[name]?.[opts[name].length - 1];
+
+const USAGE = `Usage: sandboxrouter <command> [options]
+
+Commands:
+  configure --tenant ID --key KEY --namespace NS   save credentials
+  sandboxes run|create [--size S] [--provider P | --account A] [--connector C] [--egress HOST] [--label K=V] [--json]
+  sandboxes list [--selector K=V,...] [--json]
+  sandboxes get|logs|start|stop|delete SANDBOX
+  sandboxes exec SANDBOX [--workdir DIR] [--detach] [--stdin] [--json] -- COMMAND...
+  sandboxes files get|put|delete SANDBOX PATH [FILE]
+  providers list · provider-configs list · connectors list
+  billing ...                                      needs a key with billing access
+
+Docs: https://sandboxrouter.io/docs/cli`;
+if (positional[0] === "help" || "help" in opts || positional.length === 0) { out(USAGE); process.exit(0); }
+if (positional[0] === "configure") { out("Saved sandboxrouter.io credentials."); process.exit(0); }
+if (fs.existsSync(path.join(HOME, "unconfigured"))) {
+  fail(2, "name the workspace's namespace: sandboxrouter configure --namespace NS, or pass --namespace");
+}
+
+const accounts = lines("accounts");
+const rootOf = (uid) => path.join(HOME, "sandboxes", uid, "root");
+const mapPath = (uid, p) => {
+  const prefix = MAPPED.find((m) => p === m || p.startsWith(m + "/"));
+  if (!prefix) fail(1, `eval stand-in: path ${p} is outside ${MAPPED.join(", ")}`);
+  return path.join(rootOf(uid), p);
+};
+// Rewrites sandbox paths inside a command's words (sh -c scripts too) to their folder here.
+const mapWords = (uid, words) => words.map((w) => MAPPED.reduce(
+  (s, m) => s.replace(new RegExp(`(^|[\\s'"=:(])${m.replace(/\//g, "\\/")}(?=/|$|[\\s'";)])`, "g"), `$1${path.join(rootOf(uid), m)}`), w));
+const find = (ref) => {
+  const s = load().find((x) => x.metadata.uid === ref || x.metadata.name === ref);
+  if (!s) fail(1, `Sandbox.sandboxrouter.io "${ref}" not found`);
+  return s;
+};
+const labelsOf = () => Object.fromEntries((opts.label ?? []).map((l) => l.split("=")));
+const matches = (s, selector) => !selector || selector.split(",").every((kv) => { const [k, v] = kv.split("="); return s.metadata.labels?.[k] === v; });
+
+function create() {
+  const provider = one("provider") ?? (one("account") ? one("account") : null);
+  let placed;
+  if (provider && provider !== "auto") {
+    if (provider !== "cloudflare" && !accounts.includes(provider)) fail(1, `no ${provider} account is connected to this workspace`);
+    placed = provider;
+  } else {
+    // Auto: the user's own accounts first, then Native; a host list or a connector goes to Native only.
+    const nativeOnly = (opts.egress?.length ?? 0) > 0 || (opts.connector?.length ?? 0) > 0;
+    placed = nativeOnly ? "cloudflare" : (["daytona", "freestyle", "e2b"].find((p) => accounts.includes(p)) ?? "cloudflare");
+  }
+  for (const c of opts.connector ?? []) if (!lines("connectors").includes(c)) fail(1, `connector ${c} is not in this workspace`);
+  const uid = "u-" + crypto.randomBytes(20).toString("hex").slice(0, 40);
+  const sandbox = {
+    apiVersion: "sandboxrouter.io/v1", kind: "Sandbox",
+    metadata: { name: one("name") ?? `${NAMESPACE}-${crypto.randomBytes(3).toString("hex").slice(0, 5)}`, namespace: NAMESPACE, uid, labels: labelsOf(), creationTimestamp: new Date().toISOString() },
+    spec: { resources: { size: one("size") ?? "m" }, connectors: opts.connector ?? [], state: "Running" },
+    status: { phase: "Running", provider: { name: placed, id: crypto.randomUUID() } },
+  };
+  fs.mkdirSync(path.join(rootOf(uid), WORKDIR), { recursive: true });
+  fs.mkdirSync(path.join(rootOf(uid), "tmp"), { recursive: true });
+  save([...load(), sandbox]);
+  if (opts.json) return out(JSON.stringify(sandbox, null, 2));
+  out(`Sandbox ${sandbox.metadata.name} (${uid})\nphase: Running\nprovider: ${placed}\nsize: ${sandbox.spec.resources.size}`);
+}
+
+// A sandbox command's environment: setup.sh's sandbox-bin first on PATH (git clone, uname, hostname, id, whoami answer as
+// a Linux sandbox would), and HOME in the sandbox's folder.
+const sandboxEnv = (uid) => ({ ...process.env, PATH: `${path.join(HOME, "sandbox-bin")}:${process.env.PATH}`, HOME: path.join(rootOf(uid), WORKDIR), USER: "user" });
+
+function exec(s) {
+  if (s.status.phase !== "Running") fail(1, "sandbox is not running");
+  const uid = s.metadata.uid;
+  if (!command?.length) fail(2, "sandboxes exec takes a sandbox and the command after --, or a sandbox and an exec ID");
+  if (command.length > 32 || command.some((w) => !w || w.length > 512)) fail(2, "the command needs 1 to 32 nonempty arguments of at most 512 characters");
+  const execId = crypto.randomUUID();
+  if (opts.detach) return out(opts.json ? JSON.stringify({ execId, state: "running" }) : `Exec ${execId} running. Read it with sandboxrouter sandboxes exec ${s.metadata.name} ${execId}`);
+  const cwd = mapPath(uid, one("workdir") ?? WORKDIR);
+  fs.mkdirSync(cwd, { recursive: true });
+  // github.com over HTTPS: the scenario's local repos when the sandbox has the GitHub connector, else a path that fails.
+  const github = s.spec.connectors.includes("github") ? `file://${path.join(HOME, "repos")}/` : "file:///github-com-without-credentials/";
+  const [bin, ...args] = mapWords(uid, command).map((w) => w.replace(/https:\/\/github\.com\//g, github));
+  const r = bin === "pwd" ? { status: 0, stdout: (one("workdir") ?? WORKDIR) + "\n", stderr: "" }
+    : spawnSync(bin, args, { cwd, encoding: "utf8", input: opts.stdin ? fs.readFileSync(0) : undefined, env: sandboxEnv(uid) });
+  const exitCode = r.error ? 127 : r.status;
+  // Show sandbox paths, not the local folder that stands in for the sandbox (macOS adds /private in front of temp paths).
+  const root = rootOf(uid);
+  const tools = path.join(HOME, "tools", "bin");   // the git and make setup.sh copies in on macOS
+  const unmap = (s) => [[tools, "/usr/bin"], [path.join(HOME, "sandbox-bin"), "/usr/bin"], [root, ""]]
+    .reduce((t, [from, to]) => t.split(real(from)).join(to).split(from).join(to), s);
+  const value = { execId, state: exitCode === 0 ? "succeeded" : "failed", exitCode, stdout: unmap(r.stdout ?? ""), stderr: r.error ? `${bin}: not found\n` : unmap(r.stderr ?? "") };
+  if (opts.json) out(JSON.stringify(value, null, 2));
+  else {
+    out(`Exec ${execId}: ${value.state} (exit ${exitCode})`);
+    if (value.stdout) process.stdout.write(value.stdout);
+    if (value.stderr) process.stderr.write(value.stderr);
+  }
+  if (exitCode !== 0) process.exit(exitCode > 0 && exitCode < 126 ? exitCode : 1);
+}
+
+const [group, sub, ...rest] = positional;
+if (group === "run") { fail(2, "eval stand-in: use sandboxrouter sandboxes run"); }
+if (group === "billing") fail(3, "this key has no billing access");
+if (group === "providers" && sub === "list") { out(["maritime", "daytona", "freestyle", "e2b", "cloudflare"].map((p, i) => `${p}\tauto ${i + 1}`).join("\n")); process.exit(0); }
+if (group === "provider-configs" && sub === "list") { out(accounts.length ? accounts.map((a) => `${a}\t${a}\tReady`).join("\n") : "No provider accounts."); process.exit(0); }
+if (group === "provider-configs") fail(3, "only an owner's key can connect or remove a provider account");
+if (group === "connectors" && sub === "list") { const c = lines("connectors"); out(c.length ? c.map((x) => `${x}\tworkspace account connected`).join("\n") : "No connectors."); process.exit(0); }
+if (group === "connectors") fail(3, "only an owner's key can change connectors");
+if (group !== "sandboxes") fail(2, `eval stand-in: ${group} is not simulated`);
+
+switch (sub) {
+  case "run": case "create": create(); break;
+  case "list": {
+    const items = load().filter((s) => matches(s, one("selector")));
+    if (opts.json) out(JSON.stringify({ items }, null, 2));
+    else out(items.length ? items.map((s) => `${s.metadata.name}\t${s.status.phase}\t${s.status.provider.name}\t${s.spec.resources.size}\t${s.metadata.uid}`).join("\n") : "No sandboxes.");
+    break;
+  }
+  case "get": { const s = find(rest[0]); out(opts.json ? JSON.stringify(s, null, 2) : `Sandbox ${s.metadata.name} (${s.metadata.uid})\nphase: ${s.status.phase}\nprovider: ${s.status.provider.name}`); break; }
+  case "delete": {
+    const s = find(rest[0]);
+    save(load().filter((x) => x.metadata.uid !== s.metadata.uid));
+    fs.rmSync(path.join(HOME, "sandboxes", s.metadata.uid), { recursive: true, force: true });
+    out(`Deleted ${s.metadata.name} (${s.metadata.uid}).`);
+    break;
+  }
+  case "exec": exec(find(rest[0])); break;
+  case "files": {
+    const [action, ref, p, file] = rest;
+    const s = find(ref), local = mapPath(s.metadata.uid, p);
+    if (action === "put") { fs.mkdirSync(path.dirname(local), { recursive: true }); fs.writeFileSync(local, fs.readFileSync(!file || file === "-" ? 0 : file)); out(`Wrote ${p}.`); }
+    else if (action === "get") { if (!fs.existsSync(local)) fail(1, `file ${p} not found`); process.stdout.write(fs.readFileSync(local)); }
+    else if (action === "delete") { fs.rmSync(local, { force: true }); out(`Deleted ${p}.`); }
+    else fail(2, "sandboxes files supports get, put and delete");
+    break;
+  }
+  case "logs": out(`${new Date().toISOString()}\tRunning\tstarted`); break;
+  case "start": case "stop": case "update": { const s = find(rest[0]); out(`Sandbox ${s.metadata.name} (${s.metadata.uid})`); break; }
+  default: fail(2, `eval stand-in: sandboxes ${sub} is not simulated`);
+}

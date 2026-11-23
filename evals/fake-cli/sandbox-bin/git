@@ -1,0 +1,37 @@
+#!/bin/sh
+# git inside a stand-in sandbox. `git clone` of a github.com repo copies the scenario's tree (a real clone writes
+# .git/config, which the eval's OS sandbox refuses); every other git command is the real git, next on PATH.
+if [ "${1:-}" != clone ]; then PATH=${PATH#*:} exec git "$@"; fi
+shift
+url="" dest=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --depth|--branch|-b|--origin|-o|--filter|--config|-c) shift ;;
+    -*) ;;
+    *) if [ -z "$url" ]; then url=$1; elif [ -z "$dest" ]; then dest=$1; fi ;;
+  esac
+  shift
+done
+[ -n "$url" ] || { echo "fatal: You must specify a repository to clone." >&2; exit 129; }
+[ -n "$dest" ] || dest=$(basename "${url%.git}")
+case "$url" in
+  file:///github-com-without-credentials/*)
+    echo "Cloning into '$dest'..." >&2
+    echo "fatal: could not read Username for 'https://github.com': terminal prompts disabled" >&2
+    exit 128 ;;
+  file://*)
+    src=${url#file://}; src=${src%.git}
+    if [ -d "$src" ]; then
+      [ ! -e "$dest" ] || [ -z "$(ls -A "$dest" 2>/dev/null)" ] || { echo "fatal: destination path '$dest' already exists and is not an empty directory." >&2; exit 128; }
+      echo "Cloning into '$dest'..." >&2
+      mkdir -p "$dest" && cp -R "$src/." "$dest/"
+      exit 0
+    fi
+    echo "Cloning into '$dest'..." >&2
+    echo "remote: Repository not found." >&2
+    echo "fatal: repository 'https://github.com/${src##*/repos/}/' not found" >&2
+    exit 128 ;;
+esac
+echo "Cloning into '$dest'..." >&2
+echo "fatal: unable to access '$url': Could not resolve host" >&2
+exit 128
